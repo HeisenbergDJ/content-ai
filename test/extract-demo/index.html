@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>白底转透明 Demo</title>
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+  .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .canvases { display: flex; gap: 16px; flex-wrap: wrap; }
+  .box { flex: 1; min-width: 300px; }
+  .checkerboard {
+    background-image:
+      linear-gradient(45deg, #ccc 25%, transparent 25%),
+      linear-gradient(-45deg, #ccc 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #ccc 75%),
+      linear-gradient(-45deg, transparent 75%, #ccc 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+  }
+  canvas { max-width: 100%; border: 1px solid #ddd; display: block; }
+  label { display: flex; flex-direction: column; font-size: 13px; gap: 4px; }
+  input[type=range] { width: 160px; }
+</style>
+</head>
+<body>
+  <h1>白底转透明（Canvas 阈值法）</h1>
+  <div class="controls">
+    <input type="file" id="fileInput" accept="image/*">
+    <label>
+      白色阈值 (<span id="threshVal">240</span>)
+      <input type="range" id="thresh" min="0" max="255" value="240">
+    </label>
+    <label>
+      羽化范围 (<span id="featherVal">30</span>)
+      <input type="range" id="feather" min="0" max="100" value="30">
+    </label>
+    <button id="downloadBtn" disabled>下载 PNG</button>
+  </div>
+
+  <div class="controls">
+    <button id="aiRunBtn" disabled>运行 AI 抠图 (@imgly/background-removal)</button>
+    <span id="aiStatus"></span>
+    <button id="aiDownloadBtn" disabled>下载 AI 结果 PNG</button>
+  </div>
+
+  <div class="canvases">
+    <div class="box">
+      <h3>原图</h3>
+      <canvas id="srcCanvas"></canvas>
+    </div>
+    <div class="box">
+      <h3>阈值法结果</h3>
+      <canvas id="outCanvas" class="checkerboard"></canvas>
+    </div>
+    <div class="box">
+      <h3>AI 抠图结果</h3>
+      <canvas id="aiCanvas" class="checkerboard"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const srcCanvas = document.getElementById('srcCanvas');
+    const outCanvas = document.getElementById('outCanvas');
+    const threshInput = document.getElementById('thresh');
+    const featherInput = document.getElementById('feather');
+    const threshVal = document.getElementById('threshVal');
+    const featherVal = document.getElementById('featherVal');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const srcCtx = srcCanvas.getContext('2d');
+    const outCtx = outCanvas.getContext('2d');
+
+    let currentImage = null;
+
+    function process() {
+      if (!currentImage) return;
+      const w = currentImage.width, h = currentImage.height;
+      outCanvas.width = w;
+      outCanvas.height = h;
+      outCtx.drawImage(currentImage, 0, 0);
+
+      const imgData = outCtx.getImageData(0, 0, w, h);
+      const data = imgData.data;
+      const threshold = Number(threshInput.value);
+      const feather = Number(featherInput.value);
+      const low = Math.max(0, threshold - feather);
+
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const min = Math.min(r, g, b);
+        if (min >= low) {
+          const alpha = min >= threshold ? 0 : 1 - (min - low) / (threshold - low);
+          data[i + 3] = Math.round(data[i + 3] * alpha);
+        }
+      }
+
+      outCtx.putImageData(imgData, 0, 0);
+      downloadBtn.disabled = false;
+    }
+
+    let currentFile = null;
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      currentFile = file;
+      const img = new Image();
+      img.onload = () => {
+        currentImage = img;
+        srcCanvas.width = img.width;
+        srcCanvas.height = img.height;
+        srcCtx.drawImage(img, 0, 0);
+        process();
+      };
+      img.src = URL.createObjectURL(file);
+      aiRunBtn.disabled = false;
+      aiDownloadBtn.disabled = true;
+      aiStatus.textContent = '';
+    });
+
+    threshInput.addEventListener('input', () => {
+      threshVal.textContent = threshInput.value;
+      process();
+    });
+    featherInput.addEventListener('input', () => {
+      featherVal.textContent = featherInput.value;
+      process();
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'transparent.png';
+      link.href = outCanvas.toDataURL('image/png');
+      link.click();
+    });
+
+    const aiCanvas = document.getElementById('aiCanvas');
+    const aiCtx = aiCanvas.getContext('2d');
+    const aiRunBtn = document.getElementById('aiRunBtn');
+    const aiDownloadBtn = document.getElementById('aiDownloadBtn');
+    const aiStatus = document.getElementById('aiStatus');
+
+    let removeBackground = null;
+    let aiResultBlob = null;
+
+    async function loadAiLib() {
+      if (removeBackground) return removeBackground;
+      aiStatus.textContent = '加载库中...';
+      const mod = await import('https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.8/+esm');
+      removeBackground = mod.removeBackground;
+      return removeBackground;
+    }
+
+    aiRunBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      aiRunBtn.disabled = true;
+      try {
+        const fn = await loadAiLib();
+        aiStatus.textContent = '推理中（首次会下载模型，可能需要几十秒）...';
+        aiResultBlob = await fn(currentFile, {
+          progress: (key, current, total) => {
+            aiStatus.textContent = `${key}: ${current}/${total}`;
+          }
+        });
+        const url = URL.createObjectURL(aiResultBlob);
+        const img = new Image();
+        img.onload = () => {
+          aiCanvas.width = img.width;
+          aiCanvas.height = img.height;
+          aiCtx.drawImage(img, 0, 0);
+          aiStatus.textContent = '完成';
+          aiDownloadBtn.disabled = false;
+        };
+        img.src = url;
+      } catch (err) {
+        aiStatus.textContent = '出错: ' + err.message;
+        console.error(err);
+      } finally {
+        aiRunBtn.disabled = false;
+      }
+    });
+
+    aiDownloadBtn.addEventListener('click', () => {
+      if (!aiResultBlob) return;
+      const link = document.createElement('a');
+      link.download = 'ai-transparent.png';
+      link.href = URL.createObjectURL(aiResultBlob);
+      link.click();
+    });
+  </script>
+</body>
+</html>

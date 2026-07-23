@@ -1,0 +1,1 @@
+$env:CONTENTAI_DB_NAME="contentai"; mongosh "mongodb://localhost:27017" scripts/init-contentai-db.mongosh.js
